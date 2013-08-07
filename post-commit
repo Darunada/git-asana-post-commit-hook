@@ -1,0 +1,339 @@
+#!/usr/bin/php
+<?php 
+
+/**
+
+The MIT License (MIT)
+
+Copyright (c) 2013 Lea Fairbanks <lea@modernizedmedia.com>
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+
+This code was hugely inspired by Jamie Forrest on Github.
+https://github.com/jamieforrest/github-asana
+*/
+
+class EmptyAsanaKeyException extends Exception { }
+class BadAsanaKeyException extends Exception { }
+class UnknownVerbException extends Exception { }
+
+class ColorCLI {
+	/** https://gist.github.com/donatj/1315354 **/
+ 
+	static $foreground_colors = array(
+		'bold'         => '1',    'dim'          => '2',
+		'black'        => '0;30', 'dark_gray'    => '1;30',
+		'blue'         => '0;34', 'light_blue'   => '1;34',
+		'green'        => '0;32', 'light_green'  => '1;32',
+		'cyan'         => '0;36', 'light_cyan'   => '1;36',
+		'red'          => '0;31', 'light_red'    => '1;31',
+		'purple'       => '0;35', 'light_purple' => '1;35',
+		'brown'        => '0;33', 'yellow'       => '1;33',
+		'light_gray'   => '0;37', 'white'        => '1;37',
+		'normal'       => '0;39',
+	);
+	
+	static $background_colors = array(
+		'black'        => '40',   'red'          => '41',
+		'green'        => '42',   'yellow'       => '43',
+		'blue'         => '44',   'magenta'      => '45',
+		'cyan'         => '46',   'light_gray'   => '47',
+	);
+ 
+	static $options = array(
+		'underline'    => '4',    'blink'         => '5', 
+		'reverse'      => '7',    'hidden'        => '8',
+	);
+	
+	public static function __callStatic( $foreground_color, $args ) {
+ 
+		$string = $args[0];		
+		$colored_string = "";
+ 
+		// Check if given foreground color found
+		if( isset(self::$foreground_colors[$foreground_color]) ) {
+			$colored_string .= "\033[" . self::$foreground_colors[$foreground_color] . "m";
+		}else{
+			die( $foreground_color . ' not a valid color');
+		}
+		
+		array_shift($args);
+		foreach( $args as $option ){
+			// Check if given background color found
+			if(isset(self::$background_colors[$option])) {
+				$colored_string .= "\033[" . self::$background_colors[$option] . "m";
+			}elseif(isset(self::$options[$option])) {
+				$colored_string .= "\033[" . self::$options[$option] . "m";
+			}
+		}
+		
+		// Add string and end coloring
+		$colored_string .= $string . "\033[0m";
+		
+		return $colored_string;
+		
+	}
+ 
+	public static function bell($count = 1) {
+		echo str_repeat("\007", $count);
+	}
+ 
+}
+
+class Asana {
+
+	/**
+	 * Asana API Key [format: xxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxx]
+	 * @var String
+	 */
+	private $asana_key;
+
+	public function __construct() {
+		// fetch the asana key from git config
+		$this->asana_key = exec('git config asana.key');
+
+		// throw an exception if the asana key doesn't exist
+		if(empty($this->asana_key)) {
+			throw new EmptyAsanaKeyException();
+		}
+
+		// verify the asana key looks like the correct format
+		// API keys look like this xxxxxxx.xxxxxxxxxxxxxxxxxxxxxxxx
+		$parts = explode('.', $this->asana_key);
+		if(strlen($parts[0]) != 7 || !isset($parts[1]) || strlen($parts[1]) != 24) {
+			throw new BadAsanaKeyException($this->asana_key);
+		}
+	}
+
+	function get_asana_key() {
+		return $this->asana_key;
+	}
+
+	function send_task($task) {
+
+		// tasks consist of an id and a verb (and 'see' has message)
+		$id = $task['id'];
+		if(empty($id)) {
+			return "ID must not be empty";	
+		}
+
+		$verb = $task['verb'];
+
+
+		// Init curl
+		$curl = curl_init(); 
+		$url = "https://app.asana.com/api/1.0/tasks/$id";
+		curl_setopt($curl, CURLOPT_PORT , 443); 
+		curl_setopt($curl, CURLOPT_USERPWD, $this->get_asana_key());
+		curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0); 
+
+		$data = array();
+
+		switch($verb) {
+			case 'fix':
+				curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "PUT");
+				$data = array('completed'=>true);
+			break;
+			case 'break':
+				curl_setopt($curl, CURLOPT_CUSTOMREQUEST, "PUT");
+				$data = array('completed'=>false);
+			break;
+			case 'see':
+				$url .= "/stories";
+				curl_setopt($curl, CURLOPT_POST, 1); 
+				$data = array('text'=>$task['message'], 'type'=>'comment');
+			break;
+			default:
+				return "Unrecognized Verb.";
+		}
+
+		$result = '';
+		if(!empty($data)) {
+			curl_setopt($curl, CURLOPT_URL, $url);
+			curl_setopt($curl, CURLOPT_POSTFIELDS, http_build_query($data)); 
+			ob_start();
+			curl_exec($curl);
+			$result = ob_get_clean();
+		}
+
+		$result = json_decode($result);
+
+		if(isset($result->errors)) {
+			$error_message = '';
+			foreach($result->errors as $error) {
+				$err = $error->message."\n";
+			}
+			return $err;
+		}
+
+		return true;
+	}
+}
+
+function normalize_verb($verb) {
+	$verb = strtolower($verb);
+
+	if ($verb == 'fixing' || $verb == 'fixes' || $verb == 'fixed' || $verb == 'fix' || $verb == 'close' || $verb == 'closed' || $verb == 'closes') {
+        return 'fix';
+    } else if ($verb=='addressing' || $verb == 'referencing' || $verb == 'addresses' || $verb == 're' || $verb == 'ref' || $verb == 'references' || $verb == 'see') {
+        return 'see';
+    } else if ($verb == 'breaking' || $verb == 'breaks' || $verb == 'unfixes' || $verb == 'reopen' || $verb == 'reopens' || $verb == 're-opens' || $verb == 're-open') {
+        return 'break';
+    }
+
+    throw new UnknownVerbException($verb);
+}
+
+function get_tasks() {	
+	// get the most recent commit information
+	list($id, $author, $message, $date) = explode('|', exec('git log -1 --pretty=format:"%h|%an|%s|%ci" HEAD'));
+
+	// define some regular expressions
+	$regex_id = "/#(\d+)/i"; // asana task numbers like #1 #2 #1235642
+	$regex_verb = "/(Referencing|Addressing|References|Addresses|".
+		"Reopening|Re-opening|Re-opens|Breaking|Unfixes|Unfixing|Reopens|Re-open|".
+		"Fixing|Closes|Closing|Closed|Breaks|Reopen|Fixed|Close|Fixes|".
+		"Refs|Ref|Fix|See|Re)/i"; // verbs for different actions
+	$regex_stop = "/\w(\.)/i"; // reset the verb after a .
+
+
+	// the resulting array of tasks we need to send to asana
+	$tasks = array();
+
+	// parse the commit message left to right
+	$current_verb = 'see';
+	$current_id = '';
+	$update = false;
+
+	$seen = array();
+
+	$words = explode(" ",$message);
+	foreach($words as &$word) {
+
+		// split on commas to allow syntax like "fixes #1,#2"
+		$split_words = explode(',', $word);
+		foreach($split_words as &$sw) {
+
+			// check if the word is an ID
+			$matches = array();
+			if(preg_match($regex_id, $sw, $matches)) { // returns 0 if no match, FALSE if error, so checking for falsy variables is good enough
+				// $matches[1] is the first match (inside of () on the regex)
+				$current_id = $matches[1];
+				$update = true;
+
+
+				// since the task was referenced, we'll add a comment just saying we mentioned it.
+				// don't want to see it more than once though...
+				if(!in_array($current_id, $seen)) {
+					$tasks[] = array(
+						'verb'=>'see',
+						'id'=>$current_id,
+						'message'=>"$author referenced this task from commit $id on $date.\nMessage: $message",
+					);
+					$seen[] = $current_id;
+				}
+				
+
+			// check if the word is a verb
+			} else if(preg_match($regex_verb, $sw, $matches)) {
+				// $matches[0] is always the whole match, so use that for verbs
+				$current_id = ''; // new verb, reset the id
+				$current_verb = $matches[0];
+				$update = true;
+			}
+
+			// if there is a new word and id to play with...
+			if($update && !empty($current_verb) && !empty($current_id)) {
+				$update = false;
+
+				try{
+					$verb = normalize_verb($current_verb);
+					if($verb != 'see') { // see is already handled
+						// fix or break will open or close a ticket respectively
+						$tasks[] = array(
+							'verb'=>$verb,
+							'id'=>$current_id,
+						);
+					}
+
+				} catch(UnknownVerbException $e) {
+					// do
+					// nothing
+				}
+			}
+
+		} unset($sw);
+	} unset($word);
+
+	return $tasks;
+}
+
+function send_tasks_to_asana($tasks, $asana) {
+	$num = count($tasks);
+	echo ColorCLI::light_green("Communicating with Asana [$num tasks] ");
+	foreach($tasks as &$task) {
+		echo ColorCLI::light_green(". ");
+		$resp = $asana->send_task($task);
+		if($resp !== true) {
+			echo ColorCLI::light_red("- "),"\n";
+			return $resp;
+		}
+		
+	} unset($task);
+
+	return true;
+}
+
+$asana = new stdClass();
+$asana_key = '';
+
+try {
+	$asana = new Asana();
+} catch(EmptyAsanaKeyException $e) {
+	echo ColorCLI::light_red("Git Asana Hook is installed, but no asana key is configured. To configure, use the following command:\n");
+	echo ColorCLI::light_red("Use "),ColorCLI::cyan("git config asana.key {your-asana-key}"),ColorCLI::light_red(" to configure\n");
+	exit(); // continue with the commit
+} catch(BadAsanaKeyException $e) {
+	echo ColorCLI::light_red("Git Asana Hook is configured, but your asana key appears to be an incorrect format.\n");
+	echo ColorCLI::light_red("Your Asana API key is: "), ColorCLI::cyan("{$e->getMessage()}\n");
+	echo ColorCLI::light_red("Verify your key, and use "),ColorCLI::cyan("git config asana.key {your-asana-key}"),ColorCLI::light_red(" to reconfigure if necessary\n");
+	exit(); // continue with the commit
+}
+	// get the asana key
+	if(method_exists($asana, 'get_asana_key')) {
+		$asana_key = $asana->get_asana_key();	
+	} else {
+		// somehow it got through the valid key checks
+		// throw up an error all over the place
+		// and this will need to be fixed
+		throw new BadAsanaKeyException("Failed to call get_asana_key() on Asana object.");
+	}
+
+
+// get all the tasks that need to be sent to Asana
+$tasks = get_tasks();
+
+// send them off
+$status = send_tasks_to_asana($tasks, $asana);
+
+if($status === true) {
+	echo ColorCLI::light_green("Done!\n");
+} else {
+	echo ColorCLI::light_red("The following error has occured: $status\n");
+}
