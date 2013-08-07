@@ -74,3 +74,8 @@ The end of any sentence resets any verbs used earlier in the sentence:
     git commit -m "Fixed #123123, breaks #999. I should mention #7 too." (#7 is not broken like #999; it only receives a comment)
 
 Task IDs in Asana are the strings of digits after the final slash in the url, visible when you're viewing a task.
+
+Credits
+=======
+
+This project was hugely inspired by Github user Jamie Forrest.  https://github.com/jamieforrest/github-asana
